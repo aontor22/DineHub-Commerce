@@ -1,0 +1,21 @@
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import {OAuth2Client} from 'google-auth-library';
+import {query} from './db.js';
+import {cleanEmail,httpError,safeUser} from './utils.js';
+const googleClient=new OAuth2Client();
+const secret=()=>{if(!process.env.JWT_SECRET||process.env.JWT_SECRET.length<32)throw new Error('JWT_SECRET must be at least 32 characters');return process.env.JWT_SECRET};
+const cookieOptions=()=>({httpOnly:true,secure:process.env.NODE_ENV==='production'||process.env.COOKIE_SECURE==='true',sameSite:process.env.COOKIE_SAMESITE==='none'?'none':'lax',path:'/',maxAge:7*24*60*60*1000});
+export function setSession(res,user){res.cookie('dinehub_session',jwt.sign({sub:user.id},secret(),{expiresIn:'7d',issuer:'dinehub'}),cookieOptions())}
+export function clearSession(res){res.clearCookie('dinehub_session',{...cookieOptions(),maxAge:undefined})}
+export async function authOptional(req,res,next){try{const token=req.cookies?.dinehub_session;if(token){const payload=jwt.verify(token,secret(),{issuer:'dinehub'});const {rows}=await query('SELECT * FROM users WHERE id=$1',[payload.sub]);req.user=rows[0]||null}else req.user=null}catch(e){req.user=null}next()}
+export function requireAuth(req,res,next){if(!req.user)return next(httpError(401,'Sign in to continue'));next()}
+export function requireAdmin(req,res,next){if(req.user?.role!=='ADMIN')return next(httpError(403,'Admin access required'));next()}
+export function registerAuth(app){
+ app.get('/api/auth/me', (req,res)=>res.json({user:safeUser(req.user),onlinePaymentEnabled:process.env.SSL_ENABLED==='true'&&!!process.env.SSL_STORE_ID&&!!process.env.SSL_STORE_PASSWORD,googleEnabled:!!process.env.GOOGLE_CLIENT_ID}));
+ app.post('/api/auth/register',async(req,res)=>{const {name,password,phone}=req.body;const email=cleanEmail(req.body.email);if(typeof name!=='string'||name.trim().length<2||name.length>80||!/^\S+@\S+\.\S+$/.test(email)||typeof password!=='string'||password.length<8||password.length>120)throw httpError(400,'Valid name, email and password (8+ characters) required');const hash=await bcrypt.hash(password,12);try{const {rows}=await query('INSERT INTO users(name,email,password_hash,phone) VALUES($1,$2,$3,$4) RETURNING *',[name.trim(),email,hash,String(phone||'').slice(0,30)]);setSession(res,rows[0]);res.status(201).json({user:safeUser(rows[0])})}catch(e){if(e.code==='23505')throw httpError(409,'Account already exists');throw e}});
+ app.post('/api/auth/login',async(req,res)=>{const email=cleanEmail(req.body.email),password=String(req.body.password||'');const {rows}=await query('SELECT * FROM users WHERE email=$1',[email]);const user=rows[0];const dummy='$2a$12$gTtdfeBL3I/y73v9FOMAtO5e2Lym2tQwRk2WyApGztlm.uQbRXwzK';const matches=await bcrypt.compare(password,user?.password_hash||dummy);if(!matches||!user?.password_hash)throw httpError(401,'Invalid email or password');setSession(res,user);res.json({user:safeUser(user)})});
+ app.post('/api/auth/google',async(req,res)=>{if(!process.env.GOOGLE_CLIENT_ID)throw httpError(503,'Google sign-in is not configured');const ticket=await googleClient.verifyIdToken({idToken:String(req.body.credential||''),audience:process.env.GOOGLE_CLIENT_ID});const payload=ticket.getPayload();if(!payload?.email_verified||!payload?.email||!payload.sub)throw httpError(401,'Google email not verified');const email=cleanEmail(payload.email);const {rows}=await query('INSERT INTO users(name,email,google_id) VALUES($1,$2,$3) ON CONFLICT(email) DO UPDATE SET google_id=CASE WHEN users.google_id IS NULL OR users.google_id=EXCLUDED.google_id THEN EXCLUDED.google_id ELSE users.google_id END RETURNING *',[payload.name||email.split('@')[0],email,payload.sub]);const user=rows[0];if(user.google_id!==payload.sub)throw httpError(409,'Google identity is already linked differently');setSession(res,user);res.json({user:safeUser(user)})});
+ app.post('/api/auth/logout', (req,res)=>{clearSession(res);res.json({ok:true})});
+ app.patch('/api/auth/me',requireAuth,async(req,res)=>{const name=String(req.body.name||'').trim(),phone=String(req.body.phone||'').trim();if(name.length<2||name.length>80||phone.length>25)throw httpError(400,'Invalid profile');const {rows}=await query('UPDATE users SET name=$1,phone=$2 WHERE id=$3 RETURNING *',[name,phone,req.user.id]);res.json({user:safeUser(rows[0])})});
+}

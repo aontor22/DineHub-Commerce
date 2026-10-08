@@ -1,0 +1,5 @@
+{
+  "name":"dinehub-commerce","private":true,"version":"1.0.0","workspaces":["client","server"],
+  "scripts":{"dev":"concurrently -k \"npm run dev -w server\" \"npm run dev -w client\"","build":"npm run build -w client","test":"npm run test -w server","check":"npm run check -w server"},
+  "devDependencies":{"concurrently":"^9.0.1"},"engines":{"node":">=20.19.0"}
+}

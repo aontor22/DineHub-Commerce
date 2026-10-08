@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    {"source": "/api/(.*)", "destination": "https://REPLACE-WITH-YOUR-API-DOMAIN.example.com/api/$1"},
+    {"source": "/(.*)", "destination": "/index.html"}
+  ]
+}
